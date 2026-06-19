@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PS2 Disc Drive — Play!</title>
+<!-- coi-serviceworker MUST load first: it injects COOP/COEP client-side so this
+     top-level page becomes crossOriginIsolated → SharedArrayBuffer works on
+     GitHub Pages (which can't set headers). It reloads the page once on first visit. -->
+<script src="coi-serviceworker.min.js"></script>
+<!-- Safari/Chrome: capture any AudioContext the emulator creates so we can resume
+     it on a user gesture (Safari starts audio suspended). Must run before Play.js. -->
+<script>
+  window.__ACs = [];
+  const __OAC = window.AudioContext || window.webkitAudioContext;
+  if(__OAC){
+    const W = function(...a){ const c = new __OAC(...a); window.__ACs.push(c); return c; };
+    W.prototype = __OAC.prototype;
+    window.AudioContext = W; window.webkitAudioContext = W;
+  }
+  window.__resumeAudio = ()=> window.__ACs.forEach(c=>{ if(c.state==='suspended') c.resume().catch(()=>{}); });
+</script>
+<style>
+  :root{
+    --navy-0:#020716; --navy-1:#061233; --navy-2:#0b2a63; --blue:#2f6cd6;
+    --cyan:#8fd0ff; --ice:#dff1ff; --gold:#d8b25a; --txt:#e9f3ff;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html,body{height:100%; background:#000; overflow:hidden; color:var(--txt);
+    font-family:"Segoe UI","Helvetica Neue",Arial,sans-serif; -webkit-font-smoothing:antialiased;}
+  #stage{position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    background:radial-gradient(120% 90% at 50% 32%, #07173a 0%, #030a1d 55%, #000 100%);}
+
+  /* the PS2 output canvas — id + size are REQUIRED to match the native code (#outputCanvas, 640x480) */
+  #outputCanvas{display:block; height:78vh; max-width:96vw; aspect-ratio:4/3; background:#000;
+    border-radius:10px; outline:none;
+    border:1px solid rgba(143,208,255,.28);
+    box-shadow:0 0 0 6px rgba(4,12,28,.85), 0 0 50px rgba(47,108,214,.30), inset 0 0 60px rgba(0,0,0,.6);}
+
+  /* top bar: back + title + fps */
+  #top{position:fixed; top:0; left:0; right:0; z-index:8; display:flex; align-items:center;
+    justify-content:space-between; padding:10px 16px; gap:12px;
+    background:linear-gradient(rgba(2,8,24,.9), transparent); pointer-events:none;}
+  #top .l,#top .r{display:flex; align-items:center; gap:12px; pointer-events:auto;}
+  #back{color:var(--cyan); text-decoration:none; font-size:12px; letter-spacing:1.5px;
+    border:1px solid rgba(143,208,255,.4); padding:7px 14px; border-radius:8px;
+    background:rgba(8,24,64,.5); transition:.15s;}
+  #back:hover{border-color:var(--cyan); background:rgba(47,108,214,.4);}
+  #ttl{font-size:12px; letter-spacing:3px; color:#9bb6e6; font-weight:700;}
+  #fps{font-size:11px; letter-spacing:1px; color:var(--gold); min-width:54px; text-align:right;}
+
+  /* INSERT DISC overlay */
+  #overlay{position:fixed; inset:0; z-index:5; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:20px; text-align:center; padding:24px;
+    transition:opacity .6s ease;
+    background:radial-gradient(120% 90% at 50% 32%, #07173a 0%, #030a1d 55%, #000 100%);}
+  #overlay.hide{opacity:0; pointer-events:none;}
+  .disc{width:118px; height:118px; border-radius:50%; position:relative;
+    background:conic-gradient(from 0deg,#0a1f4a,#2f6cd6,#8fd0ff,#2f6cd6,#0a1f4a);
+    box-shadow:0 0 40px rgba(80,150,255,.45), inset 0 0 30px rgba(0,0,0,.6); animation:spin 3.2s linear infinite;}
+  .disc::after{content:""; position:absolute; inset:50% auto auto 50%; width:34px; height:34px;
+    transform:translate(-50%,-50%); border-radius:50%; background:var(--navy-0);
+    box-shadow:inset 0 0 0 2px rgba(143,208,255,.5);}
+  @keyframes spin{to{transform:rotate(360deg);}}
+  h1{font-size:19px; letter-spacing:5px; font-weight:700; color:var(--ice); text-shadow:0 0 18px rgba(143,208,255,.5);}
+  .sub{font-size:12px; letter-spacing:1.4px; color:#9bb6e6; max-width:460px; line-height:1.7;}
+  .btn{appearance:none; border:1px solid rgba(143,208,255,.55);
+    background:linear-gradient(160deg, rgba(47,108,214,.35), rgba(8,24,64,.55)); color:var(--ice);
+    font-size:13px; letter-spacing:2px; font-weight:600; padding:14px 32px; border-radius:10px;
+    cursor:pointer; transition:.18s; text-transform:uppercase; box-shadow:0 4px 18px rgba(0,0,0,.4);}
+  .btn:hover{border-color:var(--cyan); background:linear-gradient(160deg, rgba(47,108,214,.6), rgba(8,24,64,.7)); transform:translateY(-1px);}
+  .btn[disabled]{opacity:.4; cursor:not-allowed; transform:none;}
+  .formats{font-size:11px; letter-spacing:1px; color:#6f8bbf;}
+  .pulse{color:var(--gold); letter-spacing:3px; font-size:12px; animation:blink 1.4s steps(2) infinite;}
+  @keyframes blink{50%{opacity:.25;}}
+
+  /* key pills (shared) */
+  .keys{display:flex; gap:7px; flex-wrap:wrap; justify-content:center; max-width:640px;}
+  .pill{display:inline-flex; align-items:center; gap:6px; font-size:11px; letter-spacing:1px;
+    padding:5px 9px; border-radius:7px; color:#cdddf6;
+    background:linear-gradient(90deg, rgba(60,120,255,.16), rgba(60,120,255,.05));
+    border:1px solid rgba(143,208,255,.18);}
+  .pill b{color:var(--cyan); font-weight:700;}
+  .pill .ico{color:var(--ice); font-weight:700;}
+
+  /* in-game bottom control bar */
+  #bar{position:fixed; left:0; right:0; bottom:0; z-index:4; padding:10px 14px; display:flex;
+    justify-content:center; gap:7px; flex-wrap:wrap; opacity:.5; transition:opacity .25s;
+    background:linear-gradient(transparent, rgba(2,8,24,.92)); pointer-events:none;}
+  #bar:hover{opacity:1;}
+
+  /* click-to-focus hint */
+  #focusHint{position:fixed; inset:0; z-index:6; display:none; align-items:flex-start; justify-content:center; pointer-events:none;}
+  #focusHint.on{display:flex;}
+  #focusHint span{margin-top:60px; font-size:12px; letter-spacing:2px; color:var(--navy-0);
+    background:var(--cyan); padding:8px 16px; border-radius:20px; font-weight:700;
+    box-shadow:0 4px 18px rgba(0,0,0,.5); animation:bob 1.3s ease-in-out infinite;}
+  @keyframes bob{50%{transform:translateY(4px);}}
+
+  /* loading / error */
+  #loading{position:fixed; inset:0; z-index:7; display:none; flex-direction:column; align-items:center;
+    justify-content:center; gap:18px; background:rgba(2,7,22,.9); text-align:center; padding:24px;}
+  #loading.on{display:flex;}
+  .ldtxt{color:var(--cyan); letter-spacing:3px; font-size:13px; font-weight:700; animation:blink 1.4s steps(2) infinite;}
+  .barload{width:240px; height:6px; border-radius:3px; background:rgba(143,208,255,.15); overflow:hidden;}
+  .barload i{display:block; height:100%; width:35%; border-radius:3px;
+    background:linear-gradient(90deg,#3f8fff,#8fd0ff); animation:load 1.1s ease-in-out infinite;}
+  @keyframes load{0%{margin-left:-35%;}100%{margin-left:100%;}}
+  .err{color:#ff8a8a; font-size:12px; letter-spacing:1px; max-width:480px; line-height:1.7;}
+</style>
+</head>
+<body>
+  <div id="stage">
+    <!-- id + 640x480 are REQUIRED: native code does emscripten_webgl_create_context("#outputCanvas")
+         and binds keyboard callbacks to it; presentation params are hardcoded 640x480. -->
+    <canvas id="outputCanvas" width="640" height="480" tabindex="-1"></canvas>
+  </div>
+
+  <div id="top">
+    <div class="l"><a id="back" href="../index.html">← CONSOLE</a></div>
+    <div class="r"><span id="ttl">PLAY! · PS2 WASM</span><span id="fps"></span></div>
+  </div>
+
+  <!-- INSERT DISC -->
+  <div id="overlay">
+    <div class="disc"></div>
+    <h1>INSERT DISC</h1>
+    <div class="sub">A real PlayStation 2, emulated in your browser with WebAssembly (Play!, BIOS-less HLE).
+      Choose a disc image or homebrew ELF to boot.</div>
+    <button class="btn" id="choose" disabled>Initializing emulator…</button>
+    <input id="file" type="file" accept=".iso,.bin,.cue,.chd,.img,.isz,.cso,.elf" style="display:none">
+    <div class="formats">.iso · .bin/.cue · .chd · .img · .elf (homebrew)</div>
+    <div class="keys" id="keysIntro"></div>
+    <div class="pulse">SONY COMPUTER ENTERTAINMENT</div>
+  </div>
+
+  <div id="bar"></div>
+  <div id="focusHint"><span>↳ CLICK THE SCREEN TO USE THE CONTROLLER</span></div>
+
+  <div id="loading">
+    <div class="ldtxt" id="ldtxt">READING DISC…</div>
+    <div class="barload"><i></i></div>
+    <div class="err" id="errbox" style="display:none"></div>
+  </div>
+
+<script type="module">
+  // ---------- authoritative Play! keymap (from Source/ui_js/Main.cpp) ----------
+  const MAP = [
+    {ico:'D-Pad', k:'Arrows'}, {ico:'✕', k:'Z'}, {ico:'◯', k:'X'}, {ico:'△', k:'S'}, {ico:'▢', k:'A'},
+    {ico:'Start', k:'Enter'}, {ico:'Select', k:'⌫'},
+    {ico:'L1/L2/L3', k:'1/2/3'}, {ico:'R1/R2/R3', k:'8/9/0'},
+    {ico:'L-Stick', k:'F H T G'}, {ico:'R-Stick', k:'J L I K'},
+  ];
+  const pill = m => `<span class="pill"><span class="ico">${m.ico}</span><b>${m.k}</b></span>`;
+  document.getElementById('keysIntro').innerHTML = MAP.map(pill).join('');
+  document.getElementById('bar').innerHTML       = MAP.map(pill).join('');
+
+  const $ = s => document.querySelector(s);
+  const overlay = $('#overlay'), loading = $('#loading'), ldtxt = $('#ldtxt'),
+        errbox = $('#errbox'), fileIn = $('#file'), chooseBtn = $('#choose'),
+        focusHint = $('#focusHint'), canvas = $('#outputCanvas'), fpsEl = $('#fps');
+
+  function fatal(msg){
+    loading.classList.add('on'); ldtxt.style.display='none';
+    errbox.style.display='block'; errbox.innerHTML = msg;
+  }
+
+  // Cross-origin isolation is required for SharedArrayBuffer (pthreads). coi-serviceworker
+  // reloads the page once to gain it; if it's still false after that, surface a clear error.
+  if(!self.crossOriginIsolated){
+    // coi-serviceworker will reload; give it a beat. If still not isolated, the SW failed.
+    setTimeout(()=>{ if(!self.crossOriginIsolated){
+      fatal("Couldn't enable cross-origin isolation (needed for the PS2 core's threads).<br>"+
+            "This needs a modern browser with service workers enabled, over HTTPS. "+
+            "Try a hard refresh, or disable private-mode/extension blocking of service workers.");
+    }}, 1500);
+  }
+
+  // ---------- DiscImageDevice (ported from js/play_browser/src/DiscImageDevice.ts) ----------
+  class DiscImageDevice {
+    constructor(module){ this.module = module; this.doneFlag = false; this.file = null; }
+    read(dstPtr, offset, size){
+      if(!this.file) throw new Error("No file set.");
+      this.doneFlag = false;
+      this.file.slice(offset, offset+size).arrayBuffer().then(buf=>{
+        this.module.HEAPU8.set(new Uint8Array(buf), dstPtr); this.doneFlag = true;
+      });
+    }
+    getFileSize(){ if(!this.file) throw new Error("No file set."); return this.file.size; }
+    isDone(){ return this.doneFlag; }
+    setFile(file){ this.file = file; }
+  }
+
+  let mod = null, booted = false;
+  const baseURL = location.origin + location.pathname.substring(0, location.pathname.lastIndexOf('/'));
+
+  async function initEmu(){
+    if(!self.crossOriginIsolated) return; // wait for coi reload
+    try{
+      const { default: Play } = await import('./Play.js');
+      mod = await Play({
+        locateFile: (p)=> baseURL + '/' + p,          // resolve Play.wasm next to this page
+        mainScriptUrlOrBlob: baseURL + '/Play.js',    // so pthread module-workers can locate the script
+        canvas,                                       // harmless extra; native targets #outputCanvas directly
+      });
+      mod.FS.mkdir('/work');
+      mod.discImageDevice = new DiscImageDevice(mod); // native reads Module.discImageDevice by name
+      mod.ccall('initVm', null, [], []);              // creates GL ctx on #outputCanvas + binds keys
+      chooseBtn.disabled = false;
+      chooseBtn.textContent = '▶ Choose Disc';
+    }catch(e){
+      console.error(e);
+      fatal("Failed to start the PS2 core.<br><code>"+(e&&e.message||e)+"</code>");
+    }
+  }
+
+  function grabFocus(){ try{ window.focus(); }catch(e){} try{ canvas.focus(); }catch(e){} }
+
+  function bootScreen(){
+    booted = true;
+    overlay.classList.add('hide');
+    loading.classList.add('on'); ldtxt.style.display='block'; errbox.style.display='none';
+    setTimeout(()=>{
+      loading.classList.remove('on'); grabFocus();
+      focusHint.classList.add('on'); setTimeout(()=>focusHint.classList.remove('on'), 6000);
+      // fps meter
+      setInterval(()=>{ if(mod){ try{ const f = mod.getFrames(); mod.clearStats(); fpsEl.textContent = f+' f/s'; }catch(e){} } }, 1000);
+    }, 2600);
+  }
+
+  async function bootFile(file){
+    if(!mod) return;
+    const name = file.name, ext = name.slice(name.lastIndexOf('.')).toLowerCase();
+    bootScreen();
+    if(window.__resumeAudio) window.__resumeAudio();
+    if(ext === '.elf'){
+      const data = new Uint8Array(await file.arrayBuffer());
+      const s = mod.FS.open(name, 'w+'); mod.FS.write(s, data, 0, data.length, 0); mod.FS.close(s);
+      mod.bootElf(name);
+    } else {
+      mod.discImageDevice.setFile(file);
+      mod.bootDiscImage(name);
+    }
+  }
+
+  chooseBtn.onclick = ()=> fileIn.click();
+  fileIn.onchange = function(){ if(this.files[0]) bootFile(this.files[0]); };
+
+  // Re-grab focus + resume audio on any tap (keyboard callbacks are bound to #outputCanvas).
+  function onPoke(){ if(window.__resumeAudio) window.__resumeAudio(); if(booted){ grabFocus(); focusHint.classList.remove('on'); } }
+  window.addEventListener('pointerdown', onPoke);
+  window.addEventListener('click', onPoke);
+  window.addEventListener('keydown', ()=>{ if(window.__resumeAudio) window.__resumeAudio(); });
+
+  // ?rom=<url> auto-boots a hosted disc/elf (e.g. a free homebrew ELF)
+  initEmu().then(()=>{
+    const rom = new URLSearchParams(location.search).get('rom');
+    if(rom && mod){ fetch(rom).then(r=>r.blob()).then(b=>{
+      const fname = rom.split('/').pop() || 'game.iso';
+      bootFile(new File([b], fname));
+    }).catch(e=>fatal("Couldn't load ?rom: "+e)); }
+  });
+</script>
+</body>
+</html>
