@@ -117,6 +117,13 @@
     background:linear-gradient(90deg,#3f8fff,#8fd0ff); animation:load 1.1s ease-in-out infinite;}
   @keyframes load{0%{margin-left:-35%;}100%{margin-left:100%;}}
   .err{color:#ff8a8a; font-size:12px; letter-spacing:1px; max-width:480px; line-height:1.7;}
+  /* diagnostics readout — always visible so a "black screen" becomes informative */
+  #diag{position:fixed; left:8px; bottom:8px; z-index:9; font:11px/1.5 ui-monospace,Menlo,Consolas,monospace;
+    color:#9bb6e6; background:rgba(2,8,24,.72); border:1px solid rgba(143,208,255,.18);
+    border-radius:7px; padding:6px 9px; max-width:46vw; white-space:pre-wrap; pointer-events:none;}
+  #diag b{color:var(--cyan);} #diag .ok{color:#7ce39a;} #diag .no{color:#ff8a8a;}
+  .errlog{margin-top:10px; max-height:32vh; overflow:auto; text-align:left; font:11px/1.45 ui-monospace,Menlo,monospace;
+    color:#bcd2f0; background:rgba(0,0,0,.4); border:1px solid rgba(143,208,255,.15); border-radius:6px; padding:8px 10px; max-width:560px; pointer-events:auto;}
 </style>
 </head>
 <body>
@@ -158,7 +165,10 @@
     <div class="ldtxt" id="ldtxt">READING DISC…</div>
     <div class="barload"><i></i></div>
     <div class="err" id="errbox" style="display:none"></div>
+    <div class="errlog" id="errlog" style="display:none"></div>
   </div>
+
+  <div id="diag">starting…</div>
 
 <script type="module">
   // ---------- authoritative Play! keymap (from Source/ui_js/Main.cpp) ----------
@@ -177,20 +187,40 @@
         errbox = $('#errbox'), fileIn = $('#file'), chooseBtn = $('#choose'),
         focusHint = $('#focusHint'), canvas = $('#outputCanvas'), fpsEl = $('#fps');
 
+  const diagEl = $('#diag'), errlogEl = $('#errlog');
+  const nativeLog = [];                 // captured stdout/stderr from the wasm core
+  function logNative(s){ nativeLog.push(s); if(nativeLog.length>400) nativeLog.shift(); }
+
+  // environment probes
+  const ua = navigator.userAgent;
+  const isSafari = /^((?!chrome|crios|android|chromium).)*safari/i.test(ua);
+  const webgl2 = (()=>{ try{ return !!document.createElement('canvas').getContext('webgl2'); }catch(e){ return false; } })();
+  const D = { coi:self.crossOriginIsolated, sab:(typeof SharedArrayBuffer!=='undefined'),
+              webgl2, init:false, frames:0, lastFrames:-1, browser:(isSafari?'Safari':'Chromium/other') };
+  function yn(v){ return v ? '<span class="ok">✓</span>' : '<span class="no">✗</span>'; }
+  function renderDiag(){
+    diagEl.innerHTML =
+      `<b>${D.browser}</b>  COI ${yn(D.coi)}  SAB ${yn(D.sab)}  WebGL2 ${yn(D.webgl2)}  core ${yn(D.init)}`
+      + (D.init ? `  ·  <b>${D.frames}</b> f/s` : '');
+  }
+  renderDiag();
+
   function fatal(msg){
     loading.classList.add('on'); ldtxt.style.display='none';
     errbox.style.display='block'; errbox.innerHTML = msg;
+    if(nativeLog.length){ errlogEl.style.display='block';
+      errlogEl.textContent = 'core log (tail):\n' + nativeLog.slice(-30).join('\n'); }
   }
 
   // Cross-origin isolation is required for SharedArrayBuffer (pthreads). coi-serviceworker
   // reloads the page once to gain it; if it's still false after that, surface a clear error.
   if(!self.crossOriginIsolated){
     // coi-serviceworker will reload; give it a beat. If still not isolated, the SW failed.
-    setTimeout(()=>{ if(!self.crossOriginIsolated){
-      fatal("Couldn't enable cross-origin isolation (needed for the PS2 core's threads).<br>"+
-            "This needs a modern browser with service workers enabled, over HTTPS. "+
-            "Try a hard refresh, or disable private-mode/extension blocking of service workers.");
-    }}, 1500);
+    setTimeout(()=>{ D.coi=self.crossOriginIsolated; D.sab=(typeof SharedArrayBuffer!=='undefined'); renderDiag();
+      if(!self.crossOriginIsolated){
+        fatal("Couldn't enable <b>cross-origin isolation</b> (needed for the PS2 core's threads).<br>"+
+            "Needs service workers enabled over HTTPS. On Safari: leave Private Browsing, disable content blockers for this site, then <b>hard refresh</b> (⌘⇧R). If you opened this before a recent update, fully quit Safari once to drop the old service worker.");
+    }}, 1800);
   }
 
   // ---------- DiscImageDevice (ported from js/play_browser/src/DiscImageDevice.ts) ----------
@@ -213,16 +243,22 @@
 
   async function initEmu(){
     if(!self.crossOriginIsolated) return; // wait for coi reload
+    if(!D.webgl2){ fatal("This browser/GPU isn't exposing <b>WebGL2</b>, which the PS2 renderer needs.<br>"+
+      "On Safari: ensure you're on macOS Safari 15+ (older needs Develop ▸ Experimental ▸ WebGL 2.0). On any browser, check hardware acceleration is on."); return; }
     try{
       const { default: Play } = await import('./Play.js');
       mod = await Play({
         locateFile: (p)=> baseURL + '/' + p,          // resolve Play.wasm next to this page
         mainScriptUrlOrBlob: baseURL + '/Play.js',    // so pthread module-workers can locate the script
         canvas,                                       // harmless extra; native targets #outputCanvas directly
+        print:    (s)=> logNative(s),                 // capture core stdout
+        printErr: (s)=> logNative(s),                 // capture core stderr (GL/asserts surface here)
+        onAbort:  (w)=> { logNative('ABORT: '+w); fatal("The PS2 core aborted during start-up.<br><code>"+w+"</code>"); },
       });
       mod.FS.mkdir('/work');
       mod.discImageDevice = new DiscImageDevice(mod); // native reads Module.discImageDevice by name
       mod.ccall('initVm', null, [], []);              // creates GL ctx on #outputCanvas + binds keys
+      D.init = true; renderDiag();
       chooseBtn.disabled = false;
       chooseBtn.textContent = '▶ Choose Disc';
       document.getElementById('demoDungeon').disabled = false;
@@ -242,8 +278,16 @@
     setTimeout(()=>{
       loading.classList.remove('on'); grabFocus();
       focusHint.classList.add('on'); setTimeout(()=>focusHint.classList.remove('on'), 6000);
-      // fps meter
-      setInterval(()=>{ if(mod){ try{ const f = mod.getFrames(); mod.clearStats(); fpsEl.textContent = f+' f/s'; }catch(e){} } }, 1000);
+      // fps meter — also feeds the diagnostic so a black-but-running canvas is distinguishable
+      let zeroTicks = 0;
+      setInterval(()=>{ if(mod){ try{
+        const f = mod.getFrames(); mod.clearStats();
+        D.frames = f; renderDiag(); fpsEl.textContent = f+' f/s';
+        // frames advancing but you see black = GL output isn't compositing (a Safari-class issue),
+        // not a dead core. Surface that distinction after a few seconds.
+        if(f === 0){ if(++zeroTicks === 6){ logNative('[diag] 6s with 0 frames — core not stepping'); } }
+        else { zeroTicks = 0; }
+      }catch(e){} } }, 1000);
     }, 2600);
   }
 
