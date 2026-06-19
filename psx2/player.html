@@ -76,6 +76,10 @@
     cursor:pointer; transition:.18s; text-transform:uppercase; box-shadow:0 4px 18px rgba(0,0,0,.4);}
   .btn:hover{border-color:var(--cyan); background:linear-gradient(160deg, rgba(47,108,214,.6), rgba(8,24,64,.7)); transform:translateY(-1px);}
   .btn[disabled]{opacity:.4; cursor:not-allowed; transform:none;}
+  .btn.ghost{font-size:11px; padding:9px 16px; letter-spacing:1px; text-transform:none;}
+  .demos{display:flex; flex-direction:column; gap:9px; align-items:center;}
+  .demos .dlbl{font-size:11px; letter-spacing:1px; color:#7d97c8;}
+  .demos .drow{display:flex; gap:10px; flex-wrap:wrap; justify-content:center;}
   .formats{font-size:11px; letter-spacing:1px; color:#6f8bbf;}
   .pulse{color:var(--gold); letter-spacing:3px; font-size:12px; animation:blink 1.4s steps(2) infinite;}
   @keyframes blink{50%{opacity:.25;}}
@@ -136,6 +140,13 @@
     <button class="btn" id="choose" disabled>Initializing emulator…</button>
     <input id="file" type="file" accept=".iso,.bin,.cue,.chd,.img,.isz,.cso,.elf" style="display:none">
     <div class="formats">.iso · .bin/.cue · .chd · .img · .elf (homebrew)</div>
+    <div class="demos">
+      <span class="dlbl">No disc handy? Boot a free MIT-licensed homebrew demo:</span>
+      <span class="drow">
+        <button class="btn ghost" id="demoDungeon" disabled>🎮 Dungeon Game — playable</button>
+        <button class="btn ghost" id="demoCubes" disabled>▣ Cubes — 3D test</button>
+      </span>
+    </div>
     <div class="keys" id="keysIntro"></div>
     <div class="pulse">SONY COMPUTER ENTERTAINMENT</div>
   </div>
@@ -214,6 +225,8 @@
       mod.ccall('initVm', null, [], []);              // creates GL ctx on #outputCanvas + binds keys
       chooseBtn.disabled = false;
       chooseBtn.textContent = '▶ Choose Disc';
+      document.getElementById('demoDungeon').disabled = false;
+      document.getElementById('demoCubes').disabled = false;
     }catch(e){
       console.error(e);
       fatal("Failed to start the PS2 core.<br><code>"+(e&&e.message||e)+"</code>");
@@ -251,6 +264,15 @@
 
   chooseBtn.onclick = ()=> fileIn.click();
   fileIn.onchange = function(){ if(this.files[0]) bootFile(this.files[0]); };
+
+  // Bundled MIT homebrew demos (glampert/ps2-homebrew) — boot without needing a ROM.
+  async function bootURL(url){
+    if(!mod) return;
+    try{ const b = await (await fetch(url)).blob(); bootFile(new File([b], url.split('/').pop())); }
+    catch(e){ fatal("Couldn't load demo: "+(e&&e.message||e)); }
+  }
+  document.getElementById('demoDungeon').onclick = ()=> bootURL('demos/dungeon_game.elf');
+  document.getElementById('demoCubes').onclick   = ()=> bootURL('demos/cubes_demo.elf');
 
   // Re-grab focus + resume audio on any tap (keyboard callbacks are bound to #outputCanvas).
   function onPoke(){ if(window.__resumeAudio) window.__resumeAudio(); if(booted){ grabFocus(); focusHint.classList.remove('on'); } }
