@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PSX Disc Drive</title>
+<style>
+  :root{
+    --navy-0:#020716; --navy-1:#061233; --blue:#2f6cd6;
+    --cyan:#8fd0ff; --ice:#dff1ff; --gold:#d8b25a; --txt:#e9f3ff;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  html,body{height:100%; background:#000; overflow:hidden;
+    font-family:"Segoe UI","Helvetica Neue",Arial,sans-serif; color:var(--txt);}
+  #stage{position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+    background:radial-gradient(120% 90% at 50% 30%, #07173a 0%, #030a1d 55%, #000 100%);}
+
+  /* the emulator canvas (lives in the web-component shadow root) is force-styled via JS */
+  wasmpsx-player{display:block;}
+
+  /* ---- INSERT DISC overlay ---- */
+  #overlay{position:fixed; inset:0; z-index:5; display:flex; flex-direction:column;
+    align-items:center; justify-content:center; gap:26px; text-align:center;
+    transition:opacity .6s ease; padding:24px;}
+  #overlay.hide{opacity:0; pointer-events:none;}
+  .disc{width:130px; height:130px; border-radius:50%; position:relative;
+    background:conic-gradient(from 0deg,#0a1f4a,#2f6cd6,#8fd0ff,#2f6cd6,#0a1f4a);
+    box-shadow:0 0 40px rgba(80,150,255,.45), inset 0 0 30px rgba(0,0,0,.6);
+    animation:spin 3.2s linear infinite;}
+  .disc::after{content:""; position:absolute; inset:50% auto auto 50%; width:38px; height:38px;
+    transform:translate(-50%,-50%); border-radius:50%; background:#020716;
+    box-shadow:inset 0 0 0 2px rgba(143,208,255,.5);}
+  .disc::before{content:""; position:absolute; inset:14px; border-radius:50%;
+    border:1px solid rgba(223,241,255,.15);}
+  @keyframes spin{to{transform:rotate(360deg);}}
+
+  h1{font-size:20px; letter-spacing:6px; font-weight:700; color:var(--ice);
+    text-shadow:0 0 18px rgba(143,208,255,.5);}
+  .sub{font-size:12px; letter-spacing:2px; color:#9bb6e6; max-width:420px; line-height:1.7;}
+  .pulse{color:var(--gold); letter-spacing:3px; font-size:13px; animation:blink 1.4s steps(2) infinite;}
+  @keyframes blink{50%{opacity:.25;}}
+
+  .btn{appearance:none; border:1px solid rgba(143,208,255,.55);
+    background:linear-gradient(160deg, rgba(47,108,214,.35), rgba(8,24,64,.55));
+    color:var(--ice); font-size:13px; letter-spacing:2px; font-weight:600;
+    padding:14px 30px; border-radius:10px; cursor:pointer; transition:.18s;
+    text-transform:uppercase; box-shadow:0 4px 18px rgba(0,0,0,.4);}
+  .btn:hover{border-color:var(--cyan); background:linear-gradient(160deg, rgba(47,108,214,.6), rgba(8,24,64,.7));
+    transform:translateY(-1px); box-shadow:0 0 22px rgba(80,150,255,.4);}
+  .formats{font-size:11px; letter-spacing:1px; color:#6f8bbf;}
+
+  /* controls cheat-sheet */
+  .keys{display:flex; gap:18px; flex-wrap:wrap; justify-content:center; font-size:11px;
+    letter-spacing:1px; color:#9bb6e6;}
+  .keys b{color:var(--cyan); font-weight:700;}
+
+  /* loading state */
+  #loading{position:fixed; inset:0; z-index:6; display:none; flex-direction:column;
+    align-items:center; justify-content:center; gap:20px; background:rgba(2,7,22,.85);}
+  #loading.on{display:flex;}
+  .bar{width:240px; height:6px; border-radius:3px; background:rgba(143,208,255,.15); overflow:hidden;}
+  .bar i{display:block; height:100%; width:35%; border-radius:3px;
+    background:linear-gradient(90deg,#3f8fff,#8fd0ff); animation:load 1.1s ease-in-out infinite;}
+  @keyframes load{0%{margin-left:-35%;}100%{margin-left:100%;}}
+</style>
+</head>
+<body>
+  <div id="stage">
+    <wasmpsx-player></wasmpsx-player>
+  </div>
+
+  <!-- INSERT DISC -->
+  <div id="overlay">
+    <div class="disc"></div>
+    <h1>INSERT DISC</h1>
+    <div class="sub">Real PlayStation hardware emulated in your browser via WebAssembly.
+      No BIOS required. Choose a disc image to boot.</div>
+    <button class="btn" id="choose">▶ Choose Disc</button>
+    <input id="file" type="file" accept=".bin,.cue,.iso,.img,.exe,.psx,.pbp" style="display:none">
+    <div class="formats">.bin · .cue · .iso · .img · .exe (PS-EXE)</div>
+    <div class="keys">
+      <span><b>Arrows</b> D-Pad</span>
+      <span><b>Z X A S</b> ✕ ◯ □ △</span>
+      <span><b>Enter</b> Start</span>
+      <span><b>Shift</b> Select</span>
+    </div>
+    <div class="pulse">SCEA · LICENSED PRODUCT</div>
+  </div>
+
+  <!-- READING DISC -->
+  <div id="loading">
+    <div class="pulse" style="color:var(--cyan)">READING DISC…</div>
+    <div class="bar"><i></i></div>
+  </div>
+
+<script src="wasmpsx.min.js"></script>
+<script>
+  const player  = document.querySelector('wasmpsx-player');
+  const overlay = document.getElementById('overlay');
+  const loading = document.getElementById('loading');
+  const fileIn  = document.getElementById('file');
+
+  // Force the shadow-DOM canvas to fill the stage crisply (poll until it exists)
+  function styleCanvas(){
+    const c = player.shadowRoot && player.shadowRoot.querySelector('canvas');
+    if(!c){ return setTimeout(styleCanvas, 80); }
+    Object.assign(c.style, {
+      display:'block', margin:'auto', position:'relative',
+      maxWidth:'100%', maxHeight:'100vh', height:'100vh',
+      objectFit:'contain', background:'#000', imageRendering:'pixelated',
+      border:'0'
+    });
+  }
+  styleCanvas();
+
+  function boot(){
+    overlay.classList.add('hide');
+    loading.classList.add('on');
+    // give the worker a moment to spin up, then reveal the canvas
+    setTimeout(()=>{ loading.classList.remove('on'); window.focus(); }, 2600);
+  }
+
+  document.getElementById('choose').onclick = ()=> fileIn.click();
+  fileIn.onchange = function(){
+    if(!this.files[0]) return;
+    boot();
+    player.readFile(this.files[0]);   // <-- real emulation starts here
+  };
+
+  // Optional: ?rom=<url> auto-boots a bundled disc image (e.g. a private/self-supplied ROM)
+  const rom = new URLSearchParams(location.search).get('rom');
+  if(rom){ boot(); player.loadUrl(rom); }
+</script>
+</body>
+</html>
