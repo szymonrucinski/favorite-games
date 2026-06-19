@@ -124,6 +124,21 @@
     <div class="barload"><i></i></div>
   </div>
 
+<!-- Safari/Mac: capture any AudioContext the emulator creates so we can resume it
+     on a user gesture. Safari (and Chrome autoplay policy) start contexts suspended;
+     without this, emulated audio is silent until — and often after — first input.
+     MUST run before wasmpsx.min.js so we wrap the constructor before it's used. -->
+<script>
+  window.__ACs = [];
+  const __OAC = window.AudioContext || window.webkitAudioContext;
+  if(__OAC){
+    const Wrapped = function(...a){ const c = new __OAC(...a); window.__ACs.push(c); return c; };
+    Wrapped.prototype = __OAC.prototype;
+    window.AudioContext = Wrapped;
+    window.webkitAudioContext = Wrapped;   // Safari still ships the prefixed name
+  }
+  window.__resumeAudio = ()=> window.__ACs.forEach(c=>{ if(c.state==='suspended') c.resume().catch(()=>{}); });
+</script>
 <script src="wasmpsx.min.js"></script>
 <script>
   // ----- real wasmpsx (TJWei / PCSX-R) keyboard map -----
@@ -143,18 +158,26 @@
   const focusHint= document.getElementById('focusHint');
 
   // Force the shadow-DOM canvas to render crisp + sized (poll until it exists)
+  let canvasEl=null;
   function styleCanvas(){
     const c = player.shadowRoot && player.shadowRoot.querySelector('canvas');
     if(!c){ return setTimeout(styleCanvas, 80); }
+    canvasEl=c;
     Object.assign(c.style, {
       display:'block', margin:'0', height:'76vh', maxWidth:'96vw',
-      objectFit:'contain', background:'#000', imageRendering:'pixelated', border:'0'
+      objectFit:'contain', background:'#000', border:'0'
     });
+    // Safari honours these prefixed values; pixelated covers Chrome/Firefox.
+    c.style.setProperty('image-rendering','pixelated');
+    c.style.setProperty('image-rendering','-webkit-optimize-contrast');
+    c.style.setProperty('image-rendering','pixelated');
+    c.tabIndex = 0;  // make the canvas focusable so Safari delivers keydown to it
   }
   styleCanvas();
 
-  // Keyboard focus is essential — SDL only reads keys when the doc has focus.
-  function grabFocus(){ try{ window.focus(); }catch(e){} }
+  // Keyboard focus is essential — SDL only reads keys when the doc/canvas has focus.
+  // Safari is stricter than Chrome, so focus the window AND the canvas.
+  function grabFocus(){ try{ window.focus(); }catch(e){} try{ canvasEl && canvasEl.focus(); }catch(e){} }
   let booted=false;
   function boot(){
     booted=true;
@@ -168,8 +191,12 @@
     }, 2600);
   }
 
-  // Any click re-grabs keyboard focus and dismisses the hint.
-  window.addEventListener('pointerdown', ()=>{ if(booted){ grabFocus(); focusHint.classList.remove('on'); }});
+  // Any tap re-grabs focus, resumes Safari/Chrome audio, and dismisses the hint.
+  // Bind both pointerdown and click for older Safari that lacks Pointer Events.
+  function onPoke(){ if(window.__resumeAudio) window.__resumeAudio(); if(booted){ grabFocus(); focusHint.classList.remove('on'); } }
+  window.addEventListener('pointerdown', onPoke);
+  window.addEventListener('click', onPoke);
+  window.addEventListener('keydown', ()=>{ if(window.__resumeAudio) window.__resumeAudio(); });
 
   document.getElementById('choose').onclick = ()=> fileIn.click();
   fileIn.onchange = function(){
