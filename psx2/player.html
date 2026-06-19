@@ -7,6 +7,12 @@
 <!-- coi-serviceworker MUST load first: it injects COOP/COEP client-side so this
      top-level page becomes crossOriginIsolated → SharedArrayBuffer works on
      GitHub Pages (which can't set headers). It reloads the page once on first visit. -->
+<!-- SAFARI FIX: force COEP:require-corp instead of the shim's default `credentialless`.
+     Safari/iOS do NOT support credentialless, so the default leaves SharedArrayBuffer
+     undefined and the PS2 core silently never starts (Chrome works, so it's easy to miss).
+     require-corp is supported on Safari 15.2+; all our assets are same-origin so nothing
+     is blocked. Must be set BEFORE coi-serviceworker.min.js loads. -->
+<script>window.coi = { coepCredentialless: () => false, coepDegrade: () => false };</script>
 <script src="coi-serviceworker.min.js"></script>
 <!-- Safari/Chrome: capture any AudioContext the emulator creates so we can resume
      it on a user gesture (Safari starts audio suspended). Must run before Play.js. -->
